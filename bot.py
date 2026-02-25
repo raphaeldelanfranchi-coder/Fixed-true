@@ -1,131 +1,90 @@
-import requests
-import pandas as pd
-import numpy as np
-import sqlite3
-import time
 import os
+import time
+import requests
+import betfairlightweight
+from telegram import Bot
 
-# ===== CONFIGURATION =====
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+# Variables environnement
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+BETFAIR_USERNAME = os.getenv("BETFAIR_USERNAME")
+BETFAIR_PASSWORD = os.getenv("BETFAIR_PASSWORD")
+BETFAIR_APP_KEY = os.getenv("BETFAIR_APP_KEY")
 
-SPORT = "soccer"
-CHECK_INTERVAL = 600  # 10 minutes
+bot = Bot(token=TELEGRAM_TOKEN)
 
-DB_NAME = "odds.db"
-
-# ===== TELEGRAM FUNCTION =====
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={
-        "chat_id": CHAT_ID,
-        "text": message
-    })
-
-# ===== DATABASE SETUP =====
-conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS odds (
-    match TEXT,
-    team TEXT,
-    odds REAL,
-    volume REAL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+# Connexion Betfair
+trading = betfairlightweight.APIClient(
+    username=BETFAIR_USERNAME,
+    password=BETFAIR_PASSWORD,
+    app_key=BETFAIR_APP_KEY
 )
-""")
-conn.commit()
 
-# ===== GET ODDS FROM API =====
-def get_odds():
-    url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "eu",
-        "markets": "h2h",
-        "oddsFormat": "decimal"
+trading.login()
+
+def get_markets():
+    market_filter = {
+        "eventTypeIds": ["1"],  # Football
+        "marketCountries": ["GB", "ES", "FR", "IT", "DE"],
+        "marketTypeCodes": ["MATCH_ODDS"]
     }
-    response = requests.get(url, params=params)
-    return response.json()
 
-# ===== SAVE DATA =====
-def save_data(match, team, odds, volume):
-    cursor.execute(
-        "INSERT INTO odds (match, team, odds, volume) VALUES (?, ?, ?, ?)",
-        (match, team, odds, volume)
-    )
-    conn.commit()
-
-# ===== ANALYZE DATA =====
-def analyze(match, team, current_odds, current_volume):
-
-    df = pd.read_sql_query(
-        "SELECT odds, volume FROM odds WHERE match=? AND team=?",
-        conn, params=(match, team)
+    return trading.betting.list_market_catalogue(
+        filter=market_filter,
+        max_results=10,
+        market_projection=["RUNNER_METADATA"]
     )
 
-    if len(df) < 10:
-        return
+def analyze_market(market_id):
+    books = trading.betting.list_market_book(
+        market_ids=[market_id],
+        price_projection={"priceData": ["EX_BEST_OFFERS"]}
+    )
 
-    mean_odds = df['odds'].mean()
-    std_odds = df['odds'].std()
-    mean_volume = df['volume'].mean()
+    book = books[0]
 
-    variation = abs((current_odds - mean_odds) / mean_odds)
+    total_volume = book.total_matched
 
-    volume_spike = current_volume > (3 * mean_volume)
+    price_changes = []
+    for runner in book.runners:
+        if runner.ex.available_to_back:
+            price = runner.ex.available_to_back[0].price
+            price_changes.append(price)
 
-    z_score = 0
-    if std_odds != 0:
-        z_score = abs((current_odds - mean_odds) / std_odds)
+    anomaly_score = 0
 
-    # ===== RISK SCORE =====
-    score = 0
+    # Volume élevé
+    if total_volume > 100000:
+        anomaly_score += 2
 
-    if variation > 0.20:
-        score += 40
+    # Cotes très basses
+    for p in price_changes:
+        if p < 1.30:
+            anomaly_score += 1
 
-    if volume_spike:
-        score += 40
+    return anomaly_score, total_volume, price_changes
 
-    if z_score > 3:
-        score += 20
+def send_alert(message):
+    bot.send_message(chat_id=CHAT_ID, text=message)
 
-    if score >= 60:
-        send_telegram(
-            f"🚨 ANOMALIE DETECTÉE\n"
-            f"Match: {match}\n"
-            f"Équipe: {team}\n"
-            f"Variation: {round(variation*100,2)}%\n"
-            f"Volume Spike: {volume_spike}\n"
-            f"Z-score: {round(z_score,2)}\n"
-            f"Score: {score}/100"
-        )
+def main():
+    while True:
+        markets = get_markets()
 
-# ===== MAIN LOOP =====
-while True:
-    try:
-        data = get_odds()
+        for market in markets:
+            score, volume, prices = analyze_market(market.market_id)
 
-        for match in data:
-            for bookmaker in match["bookmakers"]:
-                for outcome in bookmaker["markets"][0]["outcomes"]:
+            if score >= 3:
+                msg = f"""
+⚠️ Mouvement anormal détecté
+Match: {market.market_name}
+Volume: {volume}
+Cotes: {prices}
+Score anomalie: {score}
+"""
+                send_alert(msg)
 
-                    match_name = match["home_team"] + " vs " + match["away_team"]
-                    team = outcome["name"]
-                    odds = outcome["price"]
+        time.sleep(300)
 
-                    # ⚠️ Volume simulé (remplacer par Betfair API pour vrai volume)
-                    volume = np.random.randint(10000, 200000)
-
-                    save_data(match_name, team, odds, volume)
-                    analyze(match_name, team, odds, volume)
-
-        print("Scan terminé...")
-        time.sleep(CHECK_INTERVAL)
-
-    except Exception as e:
-        print("Erreur:", e)
-        time.sleep(60)
+if __name__ == "__main__":
+    main()
