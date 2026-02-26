@@ -1,18 +1,94 @@
-PRICE_HISTORY = {}
-ALERTED_MOVES = {}
+import requests
+import asyncio
+import os
+from telegram import Bot
+
+API_KEY = os.getenv("ODDS_API_KEY")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+bot = Bot(token=BOT_TOKEN)
 
 DROP_THRESHOLD = 12
 
+PRICE_HISTORY = {}
+ALERTED_MOVES = {}
+
+# -----------------------------
+# FILTRES LIGUES
+# -----------------------------
+
+EXCLUDED_LEAGUES = [
+    "Premier League",
+    "La Liga",
+    "Bundesliga",
+    "Serie A",
+    "Ligue 1",
+    "Champions League",
+    "Europa League",
+    "World Cup",
+    "Euro"
+]
+
+LOWER_DIVISION_KEYWORDS = [
+    "2",
+    "II",
+    "III",
+    "Division 2",
+    "Division 3",
+    "Primera B",
+    "Serie B",
+    "Liga 2",
+    "Reserve",
+    "U19",
+    "U21"
+]
+
+TARGET_REGIONS = [
+    "Argentina",
+    "Brazil",
+    "Romania",
+    "Bulgaria",
+    "Serbia",
+    "Bolivia",
+    "Paraguay",
+    "Peru",
+    "Indonesia",
+    "Vietnam",
+    "Thailand",
+    "India"
+]
+
+# -----------------------------
+# ANALYSE
+# -----------------------------
 
 async def analyze():
-    url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={API_KEY}&regions=eu&markets=h2h,totals"
 
+    url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={API_KEY}&regions=eu&markets=h2h,totals"
     response = requests.get(url)
     data = response.json()
 
     for match in data:
 
         league = match["sport_title"]
+
+        # -------- FILTRES --------
+
+        if any(ex.lower() in league.lower() for ex in EXCLUDED_LEAGUES):
+            continue
+
+        if not any(keyword.lower() in league.lower() for keyword in LOWER_DIVISION_KEYWORDS):
+            continue
+
+        if not any(region.lower() in league.lower() for region in TARGET_REGIONS):
+            continue
+
+        if len(match["bookmakers"]) > 10:
+            continue
+
+        # -------------------------
+
         home = match["home_team"]
         away = [t for t in match["teams"] if t != home][0]
         match_id = match["id"]
@@ -33,7 +109,7 @@ async def analyze():
 
                     unique_key = f"{match_id}_{market_type}_{label}_{line}"
 
-                    # Historique
+                    # ---------- HISTORIQUE ----------
                     if unique_key not in PRICE_HISTORY:
                         PRICE_HISTORY[unique_key] = []
 
@@ -52,7 +128,8 @@ async def analyze():
 
                     drop_percent = ((old_price - new_price) / old_price) * 100
 
-                    # Gestion multi-alertes
+                    # -------- GESTION MULTI ALERTES --------
+
                     if unique_key not in ALERTED_MOVES:
                         last_alert_price = old_price
                     else:
@@ -65,31 +142,54 @@ async def analyze():
 
                     ALERTED_MOVES[unique_key] = new_price
 
-                    # Simulation volume
-                    base_volume = 3000
-                    simulated_volume = base_volume * (1 + drop_percent/10)
-                    volume_change = drop_percent * 8
+                    # -------- SCORE SUSPICION --------
 
-                    # Construire historique formaté
+                    suspicion_score = min(100, int(drop_percent * 5))
+
+                    if suspicion_score < 40:
+                        level = "🟢 Low"
+                    elif suspicion_score < 70:
+                        level = "🟠 Medium"
+                    else:
+                        level = "🔴 High"
+
+                    # -------- HISTORIQUE FORMATÉ --------
+
                     history_text = ""
                     minute = len(history)
 
                     for h in history:
-                        simulated_row_volume = int(base_volume * (1 + (minute/10)))
-                        history_text += f"{minute:02d} | {line or '-'} | {h:.2f} | €{simulated_row_volume/1000:.2f}k\n"
+                        history_text += f"{minute:02d} | {line or '-'} | {h:.2f}\n"
                         minute -= 1
 
                     message = f"""
 ⚽️ {league}
 🏟️ {home} vs {away}
 
-📉 {market_type} | {drop_percent:.2f}% drop ({old_price:.2f} → {new_price:.2f})
-💰 Volume up {volume_change:.2f}%
+📊 Marché : {market_type}
+🎯 {label} {line}
 
-💶 Volume ({market_type}): €{simulated_volume/1000:.2f}k
+📉 {drop_percent:.2f}% drop ({old_price:.2f} → {new_price:.2f})
 
-Min | Line | Price | Volume
+🚨 Suspicion Score: {suspicion_score}/100 {level}
+
+Min | Line | Price
 {history_text}
 """
 
                     await bot.send_message(chat_id=CHAT_ID, text=message)
+
+# -----------------------------
+# LOOP
+# -----------------------------
+
+async def main():
+    while True:
+        try:
+            await analyze()
+        except Exception as e:
+            print("Erreur :", e)
+        await asyncio.sleep(120)
+
+if __name__ == "__main__":
+    asyncio.run(main())
