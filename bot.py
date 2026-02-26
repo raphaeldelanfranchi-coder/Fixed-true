@@ -21,7 +21,7 @@ PRICE_HISTORY = {}
 ALERTED_MOVES = {}
 
 # ==============================
-# FLASK (OBLIGATOIRE POUR RENDER)
+# FLASK (POUR RENDER)
 # ==============================
 
 app = Flask(__name__)
@@ -35,7 +35,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ==============================
-# FILTRE ULTRA CIBLÉ
+# FILTRE LIGUES AUTORISÉES
 # ==============================
 
 ALLOWED_KEYWORDS = [
@@ -55,20 +55,27 @@ ALLOWED_KEYWORDS = [
     "u21", "u20", "u19", "u18"
 ]
 
-BLOCK_TOP_DIVISIONS = [
-    "premier",
-    "first division",
+# Exclusion spécifique premières divisions
+BLOCK_SPECIFIC = [
+    "brazil_serie_a",
+    "brazil serie a",
+    "liga_mx",
     "liga mx",
-    "super league",
-    "serie a",
+    "bosnia_premier",
+    "bosnia premier",
+    "premier league bosnia"
+]
+
+# Exclusion compétitions majeures mondiales
+BLOCK_MAJOR = [
     "champions",
     "europa",
     "conference",
     "uefa",
     "world cup",
     "euro",
-    "copa",
-    "nations"
+    "copa america",
+    "nations league"
 ]
 
 def is_allowed_league(match):
@@ -77,12 +84,16 @@ def is_allowed_league(match):
 
     combined = sport_key + " " + sport_title
 
-    # Doit contenir un pays autorisé
+    # Doit contenir pays autorisé
     if not any(keyword in combined for keyword in ALLOWED_KEYWORDS):
         return False
 
+    # Bloquer divisions spécifiques
+    if any(block in combined for block in BLOCK_SPECIFIC):
+        return False
+
     # Bloquer compétitions majeures
-    if any(block in combined for block in BLOCK_TOP_DIVISIONS):
+    if any(block in combined for block in BLOCK_MAJOR):
         return False
 
     return True
@@ -188,17 +199,22 @@ async def analyze():
                         minute -= 1
 
                     message = f"""
+🚨 ALERTE BAISSE DE COTE 🚨
+
 ⚽ {league}
 🏟 {home} vs {away}
 
-📊 Marché : {market_type}
-🎯 Pari concerné : {bet_label}
+🎯 PARI IMPACTÉ :
+{bet_label}
 
-📉 Baisse de cote : {drop_percent:.2f}% ({old_price:.2f} → {new_price:.2f})
+📉 La cote a chuté :
+Ancienne cote : {old_price:.2f}
+Nouvelle cote : {new_price:.2f}
+Baisse totale : {drop_percent:.2f}%
 
 🚨 Score de suspicion : {suspicion_score}/100 ({level})
 
-📈 Historique des cotes :
+📈 Évolution minute par minute :
 {history_text}
 """
 
