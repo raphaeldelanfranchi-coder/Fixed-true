@@ -35,49 +35,23 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ==============================
-# FILTRES LIGUES
+# FILTRE GRANDES LIGUES
 # ==============================
 
-EXCLUDED_LEAGUES = [
-    "Premier League",
-    "La Liga",
-    "Bundesliga",
-    "Serie A",
-    "Ligue 1",
-    "Champions League",
-    "Europa League",
-    "World Cup",
-    "Euro"
-]
-
-LOWER_DIVISION_KEYWORDS = [
-    "2",
-    "II",
-    "III",
-    "Division 2",
-    "Division 3",
-    "Primera B",
-    "Serie B",
-    "Liga 2",
-    "Reserve",
-    "U19",
-    "U21"
-]
-
-TARGET_REGIONS = [
-    "Argentina",
-    "Brazil",
-    "Romania",
-    "Bulgaria",
-    "Israel",
-    "Serbia",
-    "Bolivia",
-    "Paraguay",
-    "Peru",
-    "Indonesia",
-    "Vietnam",
-    "Thailand",
-    "India"
+BIG_LEAGUE_KEYWORDS = [
+    "premier",
+    "la liga",
+    "bundesliga",
+    "serie a",
+    "ligue 1",
+    "champions",
+    "europa",
+    "conference",
+    "uefa",
+    "world cup",
+    "euro ",
+    "copa america",
+    "nations league"
 ]
 
 # ==============================
@@ -94,19 +68,9 @@ async def analyze():
 
         league = match["sport_title"]
 
-        # -------- FILTRES --------
-        if any(ex.lower() in league.lower() for ex in EXCLUDED_LEAGUES):
+        # ❌ EXCLURE GRANDES LIGUES
+        if any(keyword in league.lower() for keyword in BIG_LEAGUE_KEYWORDS):
             continue
-
-        if not any(keyword.lower() in league.lower() for keyword in LOWER_DIVISION_KEYWORDS):
-            continue
-
-        if not any(region.lower() in league.lower() for region in TARGET_REGIONS):
-            continue
-
-        if len(match["bookmakers"]) > 10:
-            continue
-        # -------------------------
 
         home = match["home_team"]
         away = [t for t in match["teams"] if t != home][0]
@@ -128,7 +92,7 @@ async def analyze():
 
                     unique_key = f"{match_id}_{market_type}_{label}_{line}"
 
-                    # Historique
+                    # -------- HISTORIQUE --------
                     if unique_key not in PRICE_HISTORY:
                         PRICE_HISTORY[unique_key] = []
 
@@ -147,6 +111,7 @@ async def analyze():
 
                     drop_percent = ((old_price - new_price) / old_price) * 100
 
+                    # -------- GESTION MULTI-ALERTES --------
                     if unique_key not in ALERTED_MOVES:
                         last_alert_price = old_price
                     else:
@@ -159,6 +124,7 @@ async def analyze():
 
                     ALERTED_MOVES[unique_key] = new_price
 
+                    # -------- SCORE SUSPICION --------
                     suspicion_score = min(100, int(drop_percent * 5))
 
                     if suspicion_score < 40:
@@ -168,6 +134,7 @@ async def analyze():
                     else:
                         level = "🔴 High"
 
+                    # -------- HISTORIQUE FORMATÉ --------
                     history_text = ""
                     minute = len(history)
 
