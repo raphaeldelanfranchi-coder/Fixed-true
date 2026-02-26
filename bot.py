@@ -35,24 +35,57 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ==============================
-# FILTRE GRANDES LIGUES
+# FILTRE ULTRA CIBLÉ
 # ==============================
 
-BIG_LEAGUE_KEYWORDS = [
+ALLOWED_KEYWORDS = [
+    "myanmar", "burma",
+    "israel",
+    "mexico",
+    "macedonia",
+    "bangladesh",
+    "bosnia",
+    "india",
+    "vietnam",
+    "malaysia",
+    "albania",
+    "bolivia",
+    "jordan",
+    "friendly",
+    "u21", "u20", "u19", "u18"
+]
+
+BLOCK_TOP_DIVISIONS = [
     "premier",
-    "la liga",
-    "bundesliga",
+    "first division",
+    "liga mx",
+    "super league",
     "serie a",
-    "ligue 1",
     "champions",
     "europa",
     "conference",
     "uefa",
     "world cup",
-    "euro ",
-    "copa america",
-    "nations league"
+    "euro",
+    "copa",
+    "nations"
 ]
+
+def is_allowed_league(match):
+    sport_key = match.get("sport_key", "").lower()
+    sport_title = match.get("sport_title", "").lower()
+
+    combined = sport_key + " " + sport_title
+
+    # Doit contenir un pays autorisé
+    if not any(keyword in combined for keyword in ALLOWED_KEYWORDS):
+        return False
+
+    # Bloquer compétitions majeures
+    if any(block in combined for block in BLOCK_TOP_DIVISIONS):
+        return False
+
+    return True
 
 # ==============================
 # ANALYSE
@@ -66,12 +99,10 @@ async def analyze():
 
     for match in data:
 
-        league = match["sport_title"]
-
-        # ❌ EXCLURE GRANDES LIGUES
-        if any(keyword in league.lower() for keyword in BIG_LEAGUE_KEYWORDS):
+        if not is_allowed_league(match):
             continue
 
+        league = match.get("sport_title", "")
         home = match["home_team"]
         away = [t for t in match["teams"] if t != home][0]
         match_id = match["id"]
@@ -90,9 +121,23 @@ async def analyze():
                     line = outcome.get("point", "")
                     price = outcome["price"]
 
+                    # Détermination du pari exact
+                    if market_type == "1X2":
+                        if label == home:
+                            bet_label = "🏠 Home (1) – Victoire domicile"
+                        elif label == away:
+                            bet_label = "🚗 Away (2) – Victoire extérieur"
+                        else:
+                            bet_label = "🤝 Draw (X) – Match nul"
+                    else:
+                        if label.lower() == "over":
+                            bet_label = f"🔼 Over {line} – Plus de {line} buts"
+                        else:
+                            bet_label = f"🔽 Under {line} – Moins de {line} buts"
+
                     unique_key = f"{match_id}_{market_type}_{label}_{line}"
 
-                    # -------- HISTORIQUE --------
+                    # Historique des cotes
                     if unique_key not in PRICE_HISTORY:
                         PRICE_HISTORY[unique_key] = []
 
@@ -111,7 +156,7 @@ async def analyze():
 
                     drop_percent = ((old_price - new_price) / old_price) * 100
 
-                    # -------- GESTION MULTI-ALERTES --------
+                    # Multi-alerte seulement si nouveau drop ≥ 12%
                     if unique_key not in ALERTED_MOVES:
                         last_alert_price = old_price
                     else:
@@ -124,36 +169,36 @@ async def analyze():
 
                     ALERTED_MOVES[unique_key] = new_price
 
-                    # -------- SCORE SUSPICION --------
+                    # Score de suspicion
                     suspicion_score = min(100, int(drop_percent * 5))
 
                     if suspicion_score < 40:
-                        level = "🟢 Low"
+                        level = "Faible"
                     elif suspicion_score < 70:
-                        level = "🟠 Medium"
+                        level = "Moyen"
                     else:
-                        level = "🔴 High"
+                        level = "Élevé"
 
-                    # -------- HISTORIQUE FORMATÉ --------
+                    # Historique formaté
                     history_text = ""
                     minute = len(history)
 
                     for h in history:
-                        history_text += f"{minute:02d} | {line or '-'} | {h:.2f}\n"
+                        history_text += f"{minute:02d} min | {h:.2f}\n"
                         minute -= 1
 
                     message = f"""
-⚽️ {league}
-🏟️ {home} vs {away}
+⚽ {league}
+🏟 {home} vs {away}
 
 📊 Marché : {market_type}
-🎯 {label} {line}
+🎯 Pari concerné : {bet_label}
 
-📉 {drop_percent:.2f}% drop ({old_price:.2f} → {new_price:.2f})
+📉 Baisse de cote : {drop_percent:.2f}% ({old_price:.2f} → {new_price:.2f})
 
-🚨 Suspicion Score: {suspicion_score}/100 {level}
+🚨 Score de suspicion : {suspicion_score}/100 ({level})
 
-Min | Line | Price
+📈 Historique des cotes :
 {history_text}
 """
 
