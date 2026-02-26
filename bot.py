@@ -69,6 +69,7 @@ TARGET_REGIONS = [
     "Brazil",
     "Romania",
     "Bulgaria",
+    "Israel",
     "Serbia",
     "Bolivia",
     "Paraguay",
