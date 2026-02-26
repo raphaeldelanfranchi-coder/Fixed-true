@@ -1,116 +1,95 @@
-import os
-import time
-import requests
-import asyncio
-import threading
-from flask import Flask
-from telegram import Bot
+PRICE_HISTORY = {}
+ALERTED_MOVES = {}
 
-# ==============================
-# CONFIG
-# ==============================
+DROP_THRESHOLD = 12
 
-API_KEY = os.getenv("ODDS_API_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-BASE_URL = "https://api.the-odds-api.com/v4/sports/soccer/odds"
-ALERT_THRESHOLD = 12  # % minimum drop
-
-alerted_matches = set()
-previous_data = {}
-
-# ==============================
-# TELEGRAM
-# ==============================
-
-async def send_alert(message):
-    bot = Bot(token=TELEGRAM_TOKEN)
-    await bot.send_message(chat_id=CHAT_ID, text=message)
-
-# ==============================
-# ANALYSE
-# ==============================
-
-def fetch_data():
-    params = {
-        "apiKey": API_KEY,
-        "regions": "eu",
-        "markets": "totals",
-        "oddsFormat": "decimal"
-    }
-    response = requests.get(BASE_URL, params=params)
-    return response.json()
-
-def calculate_suspicion(var_price, books):
-    score = 0
-
-    if var_price >= 12:
-        score += 40
-    if var_price >= 15:
-        score += 20
-    if books <= 3:
-        score += 20
-
-    return min(score, 100)
 
 async def analyze():
-    while True:
-        matches = fetch_data()
+    url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={API_KEY}&regions=eu&markets=h2h,totals"
 
-        for match in matches:
-            league = match["sport_title"]
-            home = match["home_team"]
-            away = match["away_team"]
-            books_count = len(match["bookmakers"])
+    response = requests.get(url)
+    data = response.json()
 
-            for book in match["bookmakers"]:
-                for market in book["markets"]:
-                    if market["key"] == "totals":
-                        for outcome in market["outcomes"]:
-                            if outcome["name"] == "Over":
-                                price = outcome["price"]
-                                key = f"{home}_{away}"
+    for match in data:
 
-                                if key in previous_data:
-                                    old_price = previous_data[key]
-                                    variation = ((old_price - price) / old_price) * 100
-                                    suspicion = calculate_suspicion(variation, books_count)
+        league = match["sport_title"]
+        home = match["home_team"]
+        away = [t for t in match["teams"] if t != home][0]
+        match_id = match["id"]
 
-                                    if variation >= ALERT_THRESHOLD and key not in alerted_matches:
-                                        message = f"""
-⚽ {league}
-🏟 {home} vs {away}
+        for bookmaker in match["bookmakers"]:
+            for market in bookmaker["markets"]:
 
-📉 Drop: {variation:.2f}% ({old_price} → {price})
-📊 Books actifs: {books_count}
+                if market["key"] not in ["h2h", "totals"]:
+                    continue
 
-🚨 Suspicion Score: {suspicion}/100
+                market_type = "1X2" if market["key"] == "h2h" else "Totals"
+
+                for outcome in market["outcomes"]:
+
+                    label = outcome["name"]
+                    line = outcome.get("point", "")
+                    price = outcome["price"]
+
+                    unique_key = f"{match_id}_{market_type}_{label}_{line}"
+
+                    # Historique
+                    if unique_key not in PRICE_HISTORY:
+                        PRICE_HISTORY[unique_key] = []
+
+                    PRICE_HISTORY[unique_key].append(price)
+
+                    if len(PRICE_HISTORY[unique_key]) > 15:
+                        PRICE_HISTORY[unique_key].pop(0)
+
+                    history = PRICE_HISTORY[unique_key]
+
+                    if len(history) < 2:
+                        continue
+
+                    old_price = history[0]
+                    new_price = history[-1]
+
+                    drop_percent = ((old_price - new_price) / old_price) * 100
+
+                    # Gestion multi-alertes
+                    if unique_key not in ALERTED_MOVES:
+                        last_alert_price = old_price
+                    else:
+                        last_alert_price = ALERTED_MOVES[unique_key]
+
+                    additional_drop = ((last_alert_price - new_price) / last_alert_price) * 100
+
+                    if additional_drop < DROP_THRESHOLD:
+                        continue
+
+                    ALERTED_MOVES[unique_key] = new_price
+
+                    # Simulation volume
+                    base_volume = 3000
+                    simulated_volume = base_volume * (1 + drop_percent/10)
+                    volume_change = drop_percent * 8
+
+                    # Construire historique formaté
+                    history_text = ""
+                    minute = len(history)
+
+                    for h in history:
+                        simulated_row_volume = int(base_volume * (1 + (minute/10)))
+                        history_text += f"{minute:02d} | {line or '-'} | {h:.2f} | €{simulated_row_volume/1000:.2f}k\n"
+                        minute -= 1
+
+                    message = f"""
+⚽️ {league}
+🏟️ {home} vs {away}
+
+📉 {market_type} | {drop_percent:.2f}% drop ({old_price:.2f} → {new_price:.2f})
+💰 Volume up {volume_change:.2f}%
+
+💶 Volume ({market_type}): €{simulated_volume/1000:.2f}k
+
+Min | Line | Price | Volume
+{history_text}
 """
-                                        await send_alert(message)
-                                        alerted_matches.add(key)
 
-                                previous_data[key] = price
-
-        await asyncio.sleep(120)
-
-# ==============================
-# FLASK SERVER (pour Render)
-# ==============================
-
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot is running"
-
-def run_bot():
-    asyncio.run(analyze())
-
-if __name__ == "__main__":
-    # Lancer bot en arrière-plan
-    threading.Thread(target=run_bot).start()
-
-    # Ouvrir port pour Render
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+                    await bot.send_message(chat_id=CHAT_ID, text=message)
