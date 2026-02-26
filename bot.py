@@ -1,90 +1,156 @@
 import os
 import time
 import requests
-import betfairlightweight
 from telegram import Bot
 
-# Variables environnement
+API_KEY = os.getenv("ODDS_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-BETFAIR_USERNAME = os.getenv("BETFAIR_USERNAME")
-BETFAIR_PASSWORD = os.getenv("BETFAIR_PASSWORD")
-BETFAIR_APP_KEY = os.getenv("BETFAIR_APP_KEY")
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# Connexion Betfair
-trading = betfairlightweight.APIClient(
-    username=BETFAIR_USERNAME,
-    password=BETFAIR_PASSWORD,
-    app_key=BETFAIR_APP_KEY
-)
+BASE_URL = "https://api.the-odds-api.com/v4/sports/soccer/odds"
 
-trading.login()
+ALERT_THRESHOLD = 12  # Drop minimum %
+alerted_matches = set()
+previous_data = {}
 
-def get_markets():
-    market_filter = {
-        "eventTypeIds": ["1"],  # Football
-        "marketCountries": ["GB", "ES", "FR", "IT", "DE"],
-        "marketTypeCodes": ["MATCH_ODDS"]
+LOWER_LEAGUE_KEYWORDS = [
+    "2", "II", "III",
+    "Reserve",
+    "U19", "U21",
+    "Primera B",
+    "Serie B",
+    "Liga 2",
+    "National League",
+    "Division 2",
+    "Division 3"
+]
+
+EXCLUDED_LEAGUES = [
+    "Premier League",
+    "La Liga",
+    "Serie A",
+    "Bundesliga",
+    "Ligue 1",
+    "Champions League",
+    "Europa League",
+    "World Cup"
+]
+
+def fetch_data():
+    params = {
+        "apiKey": API_KEY,
+        "regions": "eu",
+        "markets": "totals",
+        "oddsFormat": "decimal"
     }
+    response = requests.get(BASE_URL, params=params)
+    return response.json()
 
-    return trading.betting.list_market_catalogue(
-        filter=market_filter,
-        max_results=10,
-        market_projection=["RUNNER_METADATA"]
-    )
+def calculate_suspicion(var_price, var_volume, books):
+    score = 0
 
-def analyze_market(market_id):
-    books = trading.betting.list_market_book(
-        market_ids=[market_id],
-        price_projection={"priceData": ["EX_BEST_OFFERS"]}
-    )
+    if var_price >= 10:
+        score += 30
+    if var_price >= 15:
+        score += 20
 
-    book = books[0]
+    if var_volume >= 50:
+        score += 20
+    if var_volume >= 100:
+        score += 20
 
-    total_volume = book.total_matched
+    if books <= 3:
+        score += 10
 
-    price_changes = []
-    for runner in book.runners:
-        if runner.ex.available_to_back:
-            price = runner.ex.available_to_back[0].price
-            price_changes.append(price)
+    return min(score, 100)
 
-    anomaly_score = 0
+def analyze_match(match):
+    league = match["sport_title"]
 
-    # Volume élevé
-    if total_volume > 100000:
-        anomaly_score += 2
+    if any(ex.lower() in league.lower() for ex in EXCLUDED_LEAGUES):
+        return
 
-    # Cotes très basses
-    for p in price_changes:
-        if p < 1.30:
-            anomaly_score += 1
+    if not any(keyword.lower() in league.lower() for keyword in LOWER_LEAGUE_KEYWORDS):
+        return
 
-    return anomaly_score, total_volume, price_changes
+    home = match["home_team"]
+    away = match["away_team"]
+    books_count = len(match["bookmakers"])
 
-def send_alert(message):
+    for book in match["bookmakers"]:
+        for market in book["markets"]:
+            if market["key"] == "totals":
+                for outcome in market["outcomes"]:
+                    if outcome["name"] == "Over":
+                        price = outcome["price"]
+                        key = f"{home}_{away}"
+
+                        if key in previous_data:
+                            old_price, old_volume = previous_data[key]
+
+                            variation_price = ((old_price - price) / old_price) * 100
+                            volume_index = (books_count * 10) + abs(variation_price * 5)
+                            variation_volume = ((volume_index - old_volume) / old_volume) * 100 if old_volume != 0 else 0
+
+                            suspicion_score = calculate_suspicion(
+                                variation_price,
+                                variation_volume,
+                                books_count
+                            )
+
+                            if (
+                                variation_price >= ALERT_THRESHOLD
+                                and key not in alerted_matches
+                            ):
+                                send_alert(
+                                    league,
+                                    home,
+                                    away,
+                                    old_price,
+                                    price,
+                                    variation_price,
+                                    old_volume,
+                                    volume_index,
+                                    variation_volume,
+                                    books_count,
+                                    suspicion_score
+                                )
+
+                                alerted_matches.add(key)
+
+                            previous_data[key] = (price, volume_index)
+
+                        else:
+                            volume_index = books_count * 10
+                            previous_data[key] = (price, volume_index)
+
+def send_alert(league, home, away, old_price, new_price,
+               var_price, old_vol, new_vol, var_vol,
+               books, suspicion_score):
+
+    message = f"""
+⚽️ {league}
+🏟️ {home} vs {away}
+
+📉 Totals | {var_price:.2f}% drop ({old_price} → {new_price})
+💰 Volume up {var_vol:.2f}% ({old_vol:.0f} → {new_vol:.0f})
+
+💶 Market Strength Index: {new_vol:.0f}
+📊 Active Books: {books}
+
+🚨 Suspicion Score: {suspicion_score}/100
+"""
+
     bot.send_message(chat_id=CHAT_ID, text=message)
 
 def main():
     while True:
-        markets = get_markets()
-
-        for market in markets:
-            score, volume, prices = analyze_market(market.market_id)
-
-            if score >= 3:
-                msg = f"""
-⚠️ Mouvement anormal détecté
-Match: {market.market_name}
-Volume: {volume}
-Cotes: {prices}
-Score anomalie: {score}
-"""
-                send_alert(msg)
-
-        time.sleep(300)
+        matches = fetch_data()
+        for match in matches:
+            analyze_match(match)
+        time.sleep(120)
 
 if __name__ == "__main__":
     main()
