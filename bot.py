@@ -2,21 +2,41 @@ import requests
 import asyncio
 import os
 from telegram import Bot
+from flask import Flask
+from threading import Thread
+
+# ==============================
+# CONFIG
+# ==============================
 
 API_KEY = os.getenv("ODDS_API_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-bot = Bot(token=BOT_TOKEN)
-
 DROP_THRESHOLD = 12
+
+bot = Bot(token=BOT_TOKEN)
 
 PRICE_HISTORY = {}
 ALERTED_MOVES = {}
 
-# -----------------------------
+# ==============================
+# FLASK (OBLIGATOIRE POUR RENDER)
+# ==============================
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running ✅"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# ==============================
 # FILTRES LIGUES
-# -----------------------------
+# ==============================
 
 EXCLUDED_LEAGUES = [
     "Premier League",
@@ -59,9 +79,9 @@ TARGET_REGIONS = [
     "India"
 ]
 
-# -----------------------------
+# ==============================
 # ANALYSE
-# -----------------------------
+# ==============================
 
 async def analyze():
 
@@ -74,7 +94,6 @@ async def analyze():
         league = match["sport_title"]
 
         # -------- FILTRES --------
-
         if any(ex.lower() in league.lower() for ex in EXCLUDED_LEAGUES):
             continue
 
@@ -86,7 +105,6 @@ async def analyze():
 
         if len(match["bookmakers"]) > 10:
             continue
-
         # -------------------------
 
         home = match["home_team"]
@@ -109,7 +127,7 @@ async def analyze():
 
                     unique_key = f"{match_id}_{market_type}_{label}_{line}"
 
-                    # ---------- HISTORIQUE ----------
+                    # Historique
                     if unique_key not in PRICE_HISTORY:
                         PRICE_HISTORY[unique_key] = []
 
@@ -128,8 +146,6 @@ async def analyze():
 
                     drop_percent = ((old_price - new_price) / old_price) * 100
 
-                    # -------- GESTION MULTI ALERTES --------
-
                     if unique_key not in ALERTED_MOVES:
                         last_alert_price = old_price
                     else:
@@ -142,8 +158,6 @@ async def analyze():
 
                     ALERTED_MOVES[unique_key] = new_price
 
-                    # -------- SCORE SUSPICION --------
-
                     suspicion_score = min(100, int(drop_percent * 5))
 
                     if suspicion_score < 40:
@@ -152,8 +166,6 @@ async def analyze():
                         level = "🟠 Medium"
                     else:
                         level = "🔴 High"
-
-                    # -------- HISTORIQUE FORMATÉ --------
 
                     history_text = ""
                     minute = len(history)
@@ -179,11 +191,11 @@ Min | Line | Price
 
                     await bot.send_message(chat_id=CHAT_ID, text=message)
 
-# -----------------------------
-# LOOP
-# -----------------------------
+# ==============================
+# LOOP PRINCIPALE
+# ==============================
 
-async def main():
+async def main_loop():
     while True:
         try:
             await analyze()
@@ -191,5 +203,13 @@ async def main():
             print("Erreur :", e)
         await asyncio.sleep(120)
 
+def start_async_loop():
+    asyncio.run(main_loop())
+
+# ==============================
+# START
+# ==============================
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    Thread(target=run_flask).start()
+    Thread(target=start_async_loop).start()
