@@ -67,15 +67,25 @@ BLOCK_SPECIFIC = [
 ]
 
 # Exclusion compétitions majeures mondiales
-BLOCK_MAJOR = [
-    "champions",
-    "europa",
-    "conference",
-    "uefa",
-    "world cup",
-    "euro",
-    "copa america",
-    "nations league"
+BLOCK_SPECIFIC = [
+    # Brésil
+    "brazil_serie_a",
+    "brazil serie a",
+
+    # Mexique
+    "liga_mx",
+    "liga mx",
+
+    # Bosnie
+    "bosnia_premier",
+    "bosnia premier",
+    "premier league bosnia",
+
+    # Argentine (NOUVEAU)
+    "argentina_primera",
+    "argentina primera",
+    "liga profesional",
+    "superliga argentina"
 ]
 
 def is_allowed_league(match):
